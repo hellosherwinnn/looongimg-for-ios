@@ -121,20 +121,26 @@ export default function App() {
         const curr = frames[i];
 
         const shift = calculateShift(prev, curr, maskW);
-        const newH = shift;
 
         console.log(`[STITCH] Frame ${i}/${frames.length}: Shift = ${shift}px`);
-        if (newH > 0 && currentY + newH <= MAX_CANVAS_HEIGHT - footerH) {
-          tCtx.putImageData(curr, 0, 0);
+        if (shift > 0) {
+          const newH = shift;
+          if (currentY + newH <= MAX_CANVAS_HEIGHT - footerH) {
+            tCtx.putImageData(curr, 0, 0);
 
-          // Draw ONLY the newly revealed bottom part of the current frame
-          const sourceY = contentH - newH;
-          sCtx.drawImage(
-            tempCanvas,
-            0, sourceY, width, newH,
-            0, currentY, width, newH
-          );
-          currentY += newH;
+            // Draw ONLY the newly revealed bottom part of the current frame
+            const sourceY = contentH - newH;
+            sCtx.drawImage(
+              tempCanvas,
+              0, sourceY, width, newH,
+              0, currentY, width, newH
+            );
+            currentY += newH;
+          }
+        } else if (shift < 0) {
+          // Bounce back handling! Rewind the Y pointer to effectively erase overscrolled garbage
+          currentY += shift;
+          if (currentY < contentH) currentY = contentH;
         }
 
         setProgress(30 + Math.round((i / frames.length) * 60));
@@ -161,6 +167,9 @@ export default function App() {
           0, currentY, width, finalShift
         );
         currentY += finalShift;
+      } else if (finalShift < 0) {
+        currentY += finalShift;
+        if (currentY < contentH) currentY = contentH;
       }
 
       // Finally append the literal footer from the very last frame
@@ -214,48 +223,17 @@ export default function App() {
 
     // Max shift shouldn't exceed the template start Y
     const maxShift = Math.floor(h * 0.45);
+    const minShift = -Math.floor(h * 0.2); // allow up to 20% negative shift for bounce
 
-    for (let shift = 0; shift <= maxShift; shift += 4) {
-      let diff = 0;
-      let count = 0;
-
-      for (let y = 0; y < templateH; y += 4) {
-        const cY = yStart + y;
-        const pY = yStart + y + shift;
-
-        for (let x = 0; x < maskW; x += 16) {
-          const cIdx = (cY * w + x) * 4;
-          const pIdx = (pY * w + x) * 4;
-
-          diff += Math.abs(cData[cIdx] - pData[pIdx]) +
-            Math.abs(cData[cIdx + 1] - pData[pIdx + 1]) +
-            Math.abs(cData[cIdx + 2] - pData[pIdx + 2]);
-          count++;
-        }
-      }
-      const avg = diff / count;
-      const penalizedAvg = avg + (shift * 0.05); // Prefer smaller shifts
-
-      if (penalizedAvg < minDiff) {
-        minDiff = penalizedAvg;
-        bestShift = shift;
-      }
-    }
-
-    // Refine pixel-perfect match
-    let refineMinDiff = Infinity;
-    let refinedShift = bestShift;
-
-    const searchStart = Math.max(0, bestShift - 4);
-    const searchEnd = Math.min(maxShift, bestShift + 4);
-
-    for (let shift = searchStart; shift <= searchEnd; shift += 1) {
+    for (let shift = minShift; shift <= maxShift; shift += 4) {
       let diff = 0;
       let count = 0;
 
       for (let y = 0; y < templateH; y += 2) {
         const cY = yStart + y;
         const pY = yStart + y + shift;
+
+        if (pY < 0 || pY >= h) continue;
 
         for (let x = 0; x < maskW; x += 8) {
           const cIdx = (cY * w + x) * 4;
@@ -267,8 +245,46 @@ export default function App() {
           count++;
         }
       }
+      if (count === 0) continue;
       const avg = diff / count;
-      const penalizedAvg = avg + (shift * 0.05);
+      const penalizedAvg = avg + (Math.abs(shift) * 0.05);
+
+      if (penalizedAvg < minDiff) {
+        minDiff = penalizedAvg;
+        bestShift = shift;
+      }
+    }
+
+    // Refine pixel-perfect match
+    let refineMinDiff = Infinity;
+    let refinedShift = bestShift;
+
+    const searchStart = Math.max(minShift, bestShift - 4);
+    const searchEnd = Math.min(maxShift, bestShift + 4);
+
+    for (let shift = searchStart; shift <= searchEnd; shift += 1) {
+      let diff = 0;
+      let count = 0;
+
+      for (let y = 0; y < templateH; y += 2) {
+        const cY = yStart + y;
+        const pY = yStart + y + shift;
+
+        if (pY < 0 || pY >= h) continue;
+
+        for (let x = 0; x < maskW; x += 8) {
+          const cIdx = (cY * w + x) * 4;
+          const pIdx = (pY * w + x) * 4;
+
+          diff += Math.abs(cData[cIdx] - pData[pIdx]) +
+            Math.abs(cData[cIdx + 1] - pData[pIdx + 1]) +
+            Math.abs(cData[cIdx + 2] - pData[pIdx + 2]);
+          count++;
+        }
+      }
+      if (count === 0) continue;
+      const avg = diff / count;
+      const penalizedAvg = avg + (Math.abs(shift) * 0.05);
 
       if (penalizedAvg < refineMinDiff) {
         refineMinDiff = penalizedAvg;
