@@ -11,7 +11,7 @@ interface StitchResult {
 }
 
 // --- Constants ---
-const FRAME_INTERVAL = 0.1;
+const FRAME_INTERVAL = 0.04;
 const SEARCH_RANGE = 0.8;
 const MAX_CANVAS_HEIGHT = 25000;
 const HEADER_RATIO = 0.15;
@@ -208,34 +208,51 @@ export default function App() {
   /**
    * Calculates the exact pixel upward shift from prev to curr.
    */
-  const calculateShift = (prev: ImageData, curr: ImageData, maskW: number): number => {
-    const w = prev.width;
-    const h = prev.height;
+  const calculateShift = (prev: ImageData, curr: ImageData, maskW: number) => {
     const pData = prev.data;
     const cData = curr.data;
-
-    // Template from the BOTTOM half of curr (avoids floating headers)
-    const yStart = Math.floor(h * 0.55);
-    const templateH = Math.floor(h * 0.35);
+    const w = prev.width;
+    const h = prev.height;
 
     let minDiff = Infinity;
     let bestShift = 0;
 
-    // Max shift shouldn't exceed the template start Y
-    const maxShift = Math.floor(h * 0.45);
-    const minShift = -Math.floor(h * 0.2); // allow up to 20% negative shift for bounce
+    // Allow an extreme maximum shift (up to 95% of the screen height per frame)
+    const maxShift = Math.floor(h * 0.95);
+    const minShift = -Math.floor(h * 0.20);
 
     for (let shift = minShift; shift <= maxShift; shift += 4) {
       let diff = 0;
       let count = 0;
 
-      for (let y = 0; y < templateH; y += 2) {
-        const cY = yStart + y;
-        const pY = yStart + y + shift;
+      // Calculate the OVERLAPPING window between the two frames dynamically.
+      // E.g. if shift = 200 (curr moved up by 200px), 
+      // then curr's y=0 correlates to prev's y=200.
+      // So the valid range in curr is y=0 to y=(h-200).
+      let overlapStart = Math.max(0, -shift);
+      let overlapEnd = Math.min(h, h - shift);
 
-        if (pY < 0 || pY >= h) continue;
+      // The valid geometric bounds where NEITHER the curr frame's header nor the prev frame's footer are sampled:
+      // cY must be >= headerH (avoid curr's header)
+      // cY must be <= h - footerH (avoid curr's footer)
+      // pY = cY + shift must be >= headerH (avoid prev's header) -> cY >= headerH - shift
+      // pY = cY + shift must be <= h - footerH (avoid prev's footer) -> cY <= h - footerH - shift
+      const headerH = Math.floor(h * HEADER_RATIO);
+      const footerH = Math.floor(h * FOOTER_RATIO);
 
-        for (let x = 0; x < maskW; x += 8) {
+      const safeStart = Math.max(headerH, headerH - shift);
+      const safeEnd = Math.min(h - footerH, h - footerH - shift);
+
+      // If the shift is so absurdly large that there isn't at least 2% of safe screen to compare, ignore it.
+      if (safeEnd - safeStart < h * 0.02) continue;
+
+      // Sample ~40 evenly distributed rows within the safe region
+      const stepY = Math.max(1, Math.floor((safeEnd - safeStart) / 40));
+
+      for (let cY = safeStart; cY < safeEnd; cY += stepY) {
+        const pY = cY + shift;
+
+        for (let x = 0; x < maskW; x += 16) {
           const cIdx = (cY * w + x) * 4;
           const pIdx = (pY * w + x) * 4;
 
@@ -255,7 +272,7 @@ export default function App() {
       }
     }
 
-    // Refine pixel-perfect match
+    // Refine pixel-perfect match near bestShift
     let refineMinDiff = Infinity;
     let refinedShift = bestShift;
 
@@ -266,11 +283,20 @@ export default function App() {
       let diff = 0;
       let count = 0;
 
-      for (let y = 0; y < templateH; y += 2) {
-        const cY = yStart + y;
-        const pY = yStart + y + shift;
+      let overlapStart = Math.max(0, -shift);
+      let overlapEnd = Math.min(h, h - shift);
 
-        if (pY < 0 || pY >= h) continue;
+      const headerH = Math.floor(h * HEADER_RATIO);
+      const footerH = Math.floor(h * FOOTER_RATIO);
+
+      const safeStart = Math.max(headerH, headerH - shift);
+      const safeEnd = Math.min(h - footerH, h - footerH - shift);
+
+      if (safeEnd - safeStart < h * 0.02) continue;
+      const stepY = Math.max(1, Math.floor((safeEnd - safeStart) / 40));
+
+      for (let cY = safeStart; cY < safeEnd; cY += stepY) {
+        const pY = cY + shift;
 
         for (let x = 0; x < maskW; x += 8) {
           const cIdx = (cY * w + x) * 4;
@@ -292,8 +318,12 @@ export default function App() {
       }
     }
 
-    // Ignore shifts if they don't meet the threshold (e.g. large UI changes)
-    if (refineMinDiff > 40) return 0;
+    // Strict validation threshold protects against appending totally unrelated/unmatched frames.
+    // However, super-fast scrolls cause motion blur/compression artifacts in video, which raises the natural pixel diff.
+    // We scale the tolerance aggressively based on how large the shift was (e.g. up to ~150 for 95% jumps).
+    const dynamicThreshold = 40 + (Math.abs(refinedShift) / h) * 120;
+
+    if (refineMinDiff > dynamicThreshold) return 0;
     return refinedShift;
   };
 
